@@ -8,12 +8,14 @@
 const fs   = require('fs');
 const path = require('path');
 
-const HUBSPOT_TOKEN  = process.env.HUBSPOT_TOKEN;
-const SLACK_TOKEN    = process.env.SLACK_TOKEN;
-const SLACK_CHANNEL  = 'C0ATT4Y2CMQ';
-const PORTAL_ID      = '45469632';
-const CONTACT_URL    = `https://app.hubspot.com/contacts/${PORTAL_ID}/contact`;
-const STATE_FILE     = path.join(__dirname, 'state.json');
+const HUBSPOT_TOKEN     = process.env.HUBSPOT_TOKEN;
+const SLACK_TOKEN       = process.env.SLACK_TOKEN;
+const SLACK_CHANNEL     = 'C0ATT4Y2CMQ';
+const PORTAL_ID         = '45469632';
+const CONTACT_URL       = `https://app.hubspot.com/contacts/${PORTAL_ID}/contact`;
+const STATE_FILE        = path.join(__dirname, 'state.json');
+const MAX_FOLLOWUP_DAYS = 7;   // stop reminding after this many days
+const MAX_LEADS_SHOWN   = 15;  // max leads listed per owner block (Slack 3000-char limit)
 
 if (!HUBSPOT_TOKEN || !SLACK_TOKEN) {
   console.error('Missing env vars: HUBSPOT_TOKEN and SLACK_TOKEN are required');
@@ -138,13 +140,19 @@ function groupByOwner(contacts, owners) {
 }
 
 function pendingLeadBlocks(byOwner) {
-  return Object.entries(byOwner).map(([owner, leads]) => ({
-    type: 'section',
-    text: {
-      type: 'mrkdwn',
-      text: `*${owner}* — ${leads.length} pending\n${leads.map(l => `• <${CONTACT_URL}/${l.id}|${l.display}>`).join('\n')}`,
-    },
-  }));
+  return Object.entries(byOwner).map(([owner, leads]) => {
+    const shown = leads.slice(0, MAX_LEADS_SHOWN);
+    const extra = leads.length - shown.length;
+    const lines = shown.map(l => `• <${CONTACT_URL}/${l.id}|${l.display}>`);
+    if (extra > 0) lines.push(`_…and ${extra} more — check HubSpot_`);
+    return {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*${owner}* — ${leads.length} pending\n${lines.join('\n')}`,
+      },
+    };
+  });
 }
 
 function buildAlertBlocks({ label, total, marked, pending, byOwner }) {
@@ -193,6 +201,13 @@ async function main() {
   // 1. Follow up on previous days still in state
   for (const [dateKey, entry] of Object.entries(state)) {
     if (dateKey === key) continue;
+
+    const ageDays = (Date.now() - new Date(dateKey + 'T00:00:00Z').getTime()) / 86400000;
+    if (ageDays > MAX_FOLLOWUP_DAYS) {
+      console.log(`  → Dropping ${entry.label} (older than ${MAX_FOLLOWUP_DAYS} days)`);
+      delete state[dateKey];
+      continue;
+    }
 
     console.log(`Checking previous pending leads from ${entry.label}…`);
     const contacts     = await batchReadContacts(entry.pendingIds);
